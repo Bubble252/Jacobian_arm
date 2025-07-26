@@ -83,6 +83,19 @@ class Matrixf {
     res -= mat;
     return res;
   }
+
+
+
+    // 新增：一元负号运算符重载
+  Matrixf<_rows, _cols> operator-() const {
+    Matrixf<_rows, _cols> res;
+    for (int i = 0; i < _rows * _cols; i++) {
+      res.data_[i] = -this->data_[i];
+    }
+    return res;
+  }
+
+  
   Matrixf<_rows, _cols> operator*(const float& val) {
     Matrixf<_rows, _cols> res = *this;
     res *= val;
