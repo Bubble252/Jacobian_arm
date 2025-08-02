@@ -1,0 +1,185 @@
+% 读取原机器人模型
+robot = importrobot('C:\Users\bubble\Desktop\IK_test_recover\matlab\BRX042501\urdf\BRX042501_fixed_wheel_change_axis.urdf');
+robot.DataFormat = 'row';
+robot.Gravity = [0 0 -9.81];
+
+% 设置基座和末端
+
+% baseName = 'Trunk_Link';
+baseName = 'ArmR01_Link';
+%endEffector = 'ArmR08_Link';
+endEffector = 'LinearclampinggripperJZ01_Link';
+
+
+% 获取从 base → end 的 body 名称链
+bodyList = findBodyPath(robot, baseName, endEffector);
+fprintf('Base to EE path:\n');
+disp(bodyList');
+
+% 构建子树
+subRobot = rigidBodyTree('DataFormat','row');
+subRobot.Gravity = [0 0 -9.81];
+
+
+% 设置用户输入（角度制）和位置
+rotation_deg = [90, 0, 0];            % 绕 x,y,z 轴的旋转角度（单位：度）
+translation = [0, 0, 0];         % 平移
+
+% 转换为旋转矩阵
+rotation_rad = deg2rad(rotation_deg);  % 转为弧度
+rotm = eul2rotm(rotation_rad, 'XYZ');  % 你可以改为 'ZYX'、'YXZ' 等顺序
+
+% 构建变换矩阵
+T = trvec2tform(translation) * rotm2tform(rotm);
+
+% 添加 base body（没有 joint）
+% baseBody = getBody(robot, baseName);
+% baseBodyCopy = rigidBody(baseBody.Name);  % 不包含 joint
+% addBody(subRobot, baseBodyCopy, subRobot.BaseName);  % 添加到子树的 base
+
+% 原 baseBody 没有 joint，需要手动创建一个 Joint，并设置变换
+baseBody = getBody(robot, baseName);
+baseBodyCopy = rigidBody(baseBody.Name);  % 创建 body
+
+% 创建一个固定 Joint 连接到 subRobot.BaseName（即 world），并设置变换 T
+baseJoint = rigidBodyJoint('baseTransform','fixed');
+setFixedTransform(baseJoint, T);  % 设置用户输入的旋转 + 平移
+baseBodyCopy.Joint = baseJoint;
+
+% 添加到子树的 Base
+addBody(subRobot, baseBodyCopy, subRobot.BaseName);
+
+
+
+% 逐个添加中间的 body 和 joint
+for i = 2:length(bodyList)
+    currentBody = getBody(robot, bodyList{i});
+    currentBodyCopy = rigidBody(currentBody.Name);
+
+    % 复制 joint
+    currentBodyCopy.Joint = copy(currentBody.Joint);
+
+    % 复制 Visuals
+    visuals = currentBody.Visuals;
+    for v = 1:length(visuals)
+        visual = visuals(v);
+        
+        % 根据可视化类型正确调用 addVisual
+        if isfield(visual, 'Geometry')
+            geom = visual.Geometry;
+            
+            if isfield(geom, 'Mesh')
+                % Mesh 类型可视化
+                stlFilename = geom.Mesh.Filename;
+                scale = geom.Mesh.Scale;
+                addVisual(currentBodyCopy, 'mesh', stlFilename, 'Scale', scale, 'Transform', visual.Transform);
+                
+            elseif isfield(geom, 'Cylinder')
+                % Cylinder 类型可视化
+                radius = geom.Cylinder.Radius;
+                length = geom.Cylinder.Length;
+                addVisual(currentBodyCopy, 'cylinder', radius, length, 'Transform', visual.Transform);
+                
+            elseif isfield(geom, 'Box')
+                % Box 类型可视化
+                dimensions = geom.Box.Dimensions;
+                addVisual(currentBodyCopy, 'box', dimensions, 'Transform', visual.Transform);
+                
+            elseif isfield(geom, 'Sphere')
+                % Sphere 类型可视化
+                radius = geom.Sphere.Radius;
+                addVisual(currentBodyCopy, 'sphere', radius, 'Transform', visual.Transform);
+            end
+        end
+    end
+
+    % 添加到 subRobot 中
+    parentName = currentBody.Parent.Name;
+    addBody(subRobot, currentBodyCopy, parentName);
+end
+
+% 显示子链机器人
+figure;
+show(subRobot);
+title(['Subchain: ' baseName ' to ' endEffector]);
+
+dhParams = extractDHParameters(subRobot, bodyList);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function bodyList = findBodyPath(robot, baseName, endEffector)
+    % 输出 base 到末端的所有 link 名称
+    bodyList = {};
+    current = getBody(robot, endEffector);
+    while ~strcmp(current.Name, baseName)
+        bodyList = [{current.Name}, bodyList];
+        parent = current.Parent.Name;
+        if isempty(parent)
+            error('Base link not found in the path to end-effector.');
+        end
+        current = getBody(robot, parent);
+    end
+    bodyList = [{baseName}, bodyList];
+end
+
+function [theta, d, a, alpha] = transformToDH(T)
+    % 假设 T 是 4x4 位姿变换矩阵
+    % 返回标准 DH 参数
+
+    % 提取旋转和平移部分
+    R = T(1:3,1:3);
+    p = T(1:3,4);
+
+    % DH 参数推导（假设 T 是标准形式）
+    a = norm(p(1:2));          % 近似 x-y 平面距离作为 a
+    d = p(3);                  % z 位移
+    alpha = atan2(R(2,3), R(3,3));  % Rz(alpha)
+    theta = atan2(R(2,1), R(1,1));  % Rx(theta)
+end
+
+function dhParams = extractDHParameters(rbt, bodyList)
+    dhParams = [];
+    fprintf('Extracted approximate DH parameters:\n');
+    fprintf('Link\t\tTheta\t\tD\t\tA\t\tAlpha\n');
+
+    % 获取默认配置，确保 q 大小正确
+    q_home_struct = homeConfiguration(rbt);
+    q_home = zeros(1, length(q_home_struct));  % 转为 double row vector
+
+    for i = 2:length(bodyList)
+        parentName = bodyList{i-1};
+        childName = bodyList{i};
+
+        try
+            T = getTransform(rbt, q_home, childName, parentName);  % 正确大小的 q
+        catch ME
+            warning("无法获取 %s 到 %s 的变换：%s", parentName, childName, ME.message);
+            continue;
+        end
+
+        [theta, d, a, alpha] = transformToDH(T);
+        dhParams = [dhParams; theta, d, a, alpha];
+
+        fprintf('%s → %s:\t%.2f\t%.2f\t%.2f\t%.2f\n', ...
+            parentName, childName, rad2deg(theta), d, a, rad2deg(alpha));
+    end
+end

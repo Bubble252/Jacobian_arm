@@ -1,0 +1,207 @@
+clear; clc;
+
+% 构建 7DOF SRS 结构机械臂模型
+srs = create_srs();
+
+q = zeros(1, 7);        % 初始关节角度
+q_prev = q;
+dq_prev = zeros(1, 7);
+
+% 目标位姿 Td（使用 SE3 构造）
+rpy = [1.0 1.0 0.3];              % RPY姿态
+p = [0.4 0.2 0.7];              % 位置
+Rd = rpy2r(rpy);                % 旋转矩阵
+Td = SE3(Rd, p');               % 用旋转矩阵+平移向量构造 SE3（列向量）
+
+% 迭代参数
+tol = 1e-4;
+max_iter = 200;
+converged = false;
+
+fprintf("iter\tpos_err\t\tatt_err\t\tcond\t\tdq_norm\n");
+
+% 可视化
+figure(1);
+srs.plot(q, 'workspace', [-1 1 -1 1 0 1.5], 'scale', 0.5);
+hold on;
+% trplot(Td, 'frame', 'T_d', 'color', 'red', 'length', 0.2);
+
+trplot(Td, 'frame', 'T_d', 'color', 'red', 'length', 0.3, 'linewidth', 2);  % 增加轴长和线宽
+pos_errors = [];
+att_errors = [];
+dq_norms = [];
+
+actual_traj = [];
+target_traj = [];
+
+for iter = 1:max_iter
+    T = srs.fkine(q);
+    T_err = Td / T;
+    twist = Twist(T_err).S;
+    p_error = twist(1:3);
+    w_error = twist(4:6);
+
+    if norm(p_error) < tol && norm(w_error) < tol
+        converged = true;
+        break;
+    end
+
+    error_norm = sqrt(norm(p_error)^2 + norm(w_error)^2);
+    if error_norm < 0.0002
+        lambda = 0.003;
+    else
+        lambda = 0.005 + 0.05 * (1 - exp(-10 * error_norm));
+    end
+
+    J = srs.jacob0(q);       % 6x7
+    cond_J = cond(J);
+    JJT = J * J';
+    J_damped = J' / (JJT + lambda^2 * eye(6));  % 7x6
+
+    pos_weight = max(1.0, 8.0 * exp(-8.0 * norm(p_error)));
+    att_weight = max(1.0, 5.0 * exp(-8.0 * norm(w_error)));
+    weighted_twist = [p_error * pos_weight; w_error * att_weight];
+    dq_primary = (J_damped * weighted_twist)';
+
+    % 次任务：靠近 q_prev + 向中心靠拢
+    q_center = (srs.qlim(:,1) + srs.qlim(:,2))' / 2;
+    q_center_dist(iter) = norm(q - q_center);
+    task_prev = -(q - q_prev);
+    task_center = q_center - q;
+
+    weight_prev = 1.5;
+    weight_center = 0.8;
+    scale = min(1.0, error_norm * 100.0);
+    task_secondary = scale * (weight_prev * task_prev + weight_center * task_center);
+
+    % 零空间投影
+    null_proj = eye(7) - J_damped * J;
+    dq_null = (null_proj * task_secondary')';
+
+    dq = dq_primary + dq_null;
+
+    max_error = max(norm(p_error), norm(w_error));
+    max_step = max(0.0005, 0.08 * min(1.0, max_error * 8.0));
+    if norm(dq) > max_step
+        dq = dq * (max_step / norm(dq));
+    end
+
+    smooth_factor = 0.1;
+    dq = (1 - smooth_factor) * dq + smooth_factor * dq_prev;
+    dq_prev = dq;
+
+    q_prev = q;
+    q = q + dq;
+
+    srs.animate(q);
+
+    ee_pos = transl(T);
+    target_pos = transl(Td);
+    actual_traj(end+1, :) = ee_pos;
+    target_traj(end+1, :) = target_pos;
+
+    pause(0.01);
+
+    pos_errors(end+1) = norm(p_error);
+    att_errors(end+1) = norm(w_error);
+    dq_norms(end+1) = norm(dq);
+
+
+    q_history(iter, :) = q;
+
+    q_center_dist(iter) = norm(q - q_center);
+
+
+
+    dq_primary_norm(iter) = norm(dq_primary);
+    dq_null_norm(iter) = norm(dq_null);
+
+
+    fprintf("%3d\t%8.5f\t%8.5f\t%8.2f\t%8.5f\n", iter, norm(p_error), norm(w_error), cond_J, norm(dq));
+end
+
+% 最终验证
+T_final = srs.fkine(q);
+T_err = Td / T_final;
+final_twist = Twist(T_err).S;
+
+fprintf("\n最终误差:\n");
+fprintf("位置误差范数: %.6f\n", norm(final_twist(1:3)));
+fprintf("姿态误差范数: %.6f\n", norm(final_twist(4:6)));
+fprintf("是否收敛: %s\n", string(converged));
+
+% 误差曲线
+figure;
+subplot(3,1,1);
+plot(pos_errors, 'b'); ylabel('位置误差');
+subplot(3,1,2);
+plot(att_errors, 'r'); ylabel('姿态误差');
+subplot(3,1,3);
+plot(dq_norms, 'k'); ylabel('dq范数'); xlabel('迭代步');
+sgtitle('逆运动学迭代过程');
+
+% 轨迹绘图
+figure;
+hold on; grid on; axis equal; view(3);
+xlabel('X'); ylabel('Y'); zlabel('Z');
+title('末端轨迹与目标对比');
+
+plot3(actual_traj(:,1), actual_traj(:,2), actual_traj(:,3), 'b-', 'LineWidth', 2);
+plot3(target_traj(:,1), target_traj(:,2), target_traj(:,3), 'r--', 'LineWidth', 2);
+
+scatter3(actual_traj(1,1), actual_traj(1,2), actual_traj(1,3), 80, 'bo', 'filled');
+scatter3(actual_traj(end,1), actual_traj(end,2), actual_traj(end,3), 80, 'b^', 'filled');
+scatter3(target_traj(1,1), target_traj(1,2), target_traj(1,3), 80, 'ro', 'filled');
+scatter3(target_traj(end,1), target_traj(end,2), target_traj(end,3), 80, 'r^', 'filled');
+
+for i = 1:5:length(actual_traj)
+    quiver3( ...
+        target_traj(i,1), target_traj(i,2), target_traj(i,3), ...
+        actual_traj(i,1) - target_traj(i,1), ...
+        actual_traj(i,2) - target_traj(i,2), ...
+        actual_traj(i,3) - target_traj(i,3), ...
+        0, 'k', 'LineWidth', 1.2, 'MaxHeadSize', 0.5 ...
+    );
+end
+
+legend('实际轨迹', '目标轨迹', 'Location', 'best');
+
+
+
+
+
+figure;
+plot(q_history);
+title('关节角变化轨迹');
+xlabel('迭代步'); ylabel('关节角度(rad)');
+legend('q1','q2','q3','q4','q5','q6','q7');
+
+figure;
+plot(q_center_dist);
+title('q 偏离中心距离'); ylabel('||q - q_{center}||');
+xlabel('迭代步');
+
+
+
+
+
+figure;
+plot(dq_primary_norm, 'b'); hold on;
+plot(dq_null_norm, 'r');
+legend('主任务dq', '零空间dq');
+title('主任务与零空间任务的控制量比较');
+
+
+
+function srs = create_srs()
+    % 创建一个典型的7自由度机械臂模型（可按实际修改 D-H 参数）
+    L(1) = Revolute('d', 0.34,   'a', 0,     'alpha', -pi/2);
+    L(2) = Revolute('d', 0,      'a', 0,     'alpha',  pi/2);
+    L(3) = Revolute('d', 0.4,    'a', 0,     'alpha',  pi/2);
+    L(4) = Revolute('d', 0,      'a', 0,     'alpha', -pi/2);
+    L(5) = Revolute('d', 0.4,    'a', 0,     'alpha', -pi/2);
+    L(6) = Revolute('d', 0,      'a', 0,     'alpha',  pi/2);
+    L(7) = Revolute('d', 0.126,  'a', 0,     'alpha', 0);
+
+    srs = SerialLink(L, 'name', 'SRS_7DOF');
+end

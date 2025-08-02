@@ -61,7 +61,7 @@ JacobianInfo<R, C> computeJacobianInfo( Matrixf<R, C>& J, float lambda) {
     
     // 计算阻尼最小二乘伪逆 J† = (JᵀJ + λ²I)⁻¹Jᵀ
     Matrixf<C, C> JTJ = J.trans() * J;
-    Matrixf<C, C> damping = lambda * lambda * matrixf::eye<C, C>();
+    Matrixf<C, C> damping  = lambda * lambda * matrixf::eye<C, C>();
     info.pinv = matrixf::inv(JTJ + damping) * J.trans();
     
     // 计算零空间投影矩阵 P = I - J†J
